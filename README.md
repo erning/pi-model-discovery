@@ -6,7 +6,7 @@ Derived from [maplezzk/pi-extensions](https://github.com/maplezzk/pi-extensions/
 
 ## Install
 
-Install from GitHub:
+Requires Pi 1.4.0 or later. Install from GitHub:
 
 ```sh
 pi install git:github.com/erning/pi-model-discovery
@@ -61,25 +61,31 @@ Add `"discoverModels": true` to a provider in `<agent-dir>/models.json`. The age
 - `baseUrl` and `api` must be nonempty strings. Use an API supported by Pi, such as `openai-completions`.
 - Discovery fetches `GET {baseUrl}/models` by default (trailing slashes stripped). A nonempty string `modelsUrl` is used as-is instead; supply a complete URL. An empty or non-string `modelsUrl` uses the default endpoint. Requests time out after five seconds.
 - Both `{ "data": [{ "id": "model-id" }] }` and a top-level array are accepted. Entries without a nonblank string `id` are skipped; a response with no valid entries fails discovery. All accepted entries are registered as chat models.
-- Discovery resolves the provider's `headers` and optional `apiKey`. A nonempty resolved key sets `Authorization: Bearer <apiKey>`, replacing any configured Authorization header. An omitted or empty key leaves that header unchanged. The same credentials are sent to `modelsUrl` when configured.
-- Keys and header values support literals, `$NAME` / `${NAME}` interpolation, and `$$` / `$!` escapes. Missing environment variables and leading `!command` values fail discovery. Discovery does not read credentials from Pi's login storage; Pi handles chat authentication separately. Unauthenticated catalogs can omit `apiKey`, though Pi may still require a dummy key to make a local model selectable.
+- Catalog requests send the provider's `headers`. An API key sets `Authorization: Bearer <apiKey>`, replacing any configured Authorization header; without one, a configured Authorization header is sent unchanged. The same credentials are sent to `modelsUrl` when configured. Bearer is the only scheme derived from the key: a catalog that authenticates differently, such as Anthropic's `/v1/models` with `x-api-key` and `anthropic-version`, needs those headers in `headers`.
+- Startup discovery resolves `apiKey` and header values itself. They support literals, `$NAME` / `${NAME}` interpolation, and `$$` / `$!` escapes; missing or empty environment variables fail discovery. Startup never runs `!command` values: a provider whose `apiKey` is a `!command` keeps its fallback models until Pi's model refresh or `/model-discovery-refresh` discovers them. Those refreshes authenticate with Pi's effective API key for the provider, the same key used for chat, so `!command` keys and keys saved with `/login` work there. Header values never run `!command`.
+- Unauthenticated catalogs can omit `apiKey`, though Pi may still require a dummy key to make a local model selectable. Pi's background refresh also runs only for providers with a key.
 - The extension reads but does not rewrite `models.json`; BOM, `//` comments, and trailing commas are supported. After editing discovery configuration, run `/reload`. The manual refresh command uses the configuration captured when the extension loaded.
 
 ## Cache and refresh
 
-Discovered models are cached per provider ID in `<agent-dir>/cache/pi-model-discovery.json`. A valid cache with a matching fingerprint is loaded at startup without a catalog request. The fingerprint includes `baseUrl`, API type, effective catalog URL, resolved request headers (including the API key), and provider `compat`. Changes to those values invalidate the cache; changing only a provider's name or `modelOverrides` does not. Credentials must still resolve successfully to verify the fingerprint, even when offline.
+Discovered models are cached per provider ID in `<agent-dir>/cache/pi-model-discovery.json`, together with the time they were fetched. At startup, a cache entry with a matching fingerprint is loaded without a catalog request. Providers without one are fetched concurrently, before Pi selects a startup model. The fingerprint includes `baseUrl`, API type, `modelsUrl`, resolved header values, the resolved `apiKey` (for a `!command` key, its text), provider `compat`, and the extension's model format version. Changes to those values invalidate the cache; changing only a provider's name or `modelOverrides` does not. Environment variables in those values must still resolve to verify the fingerprint, even when offline.
 
-There is no time-based expiration or periodic refresh. Changes to a server's catalog alone do not invalidate the cache. During one startup or manual refresh, providers sharing the same catalog URL, resolved headers, and `compat` share a request. Each online `refreshModels` call makes its own request.
+Pi also refreshes model catalogs itself: in the background after interactive or RPC startup, and when `/model` or the scoped model selector needs fresh catalogs. Each refresh calls the provider's `refreshModels` hook twice:
 
-With `pi --offline` or `PI_OFFLINE=1` (also `true` / `yes`), startup never requests the model catalog. It uses a matching cache if available; otherwise it keeps handwritten `models` as a fallback and warns. A missing, invalid, or outdated cache does not trigger a network request in offline mode.
+- First with `allowNetwork: false`, which returns the cached models, or leaves the current models unchanged when there are none. Handwritten fallback models therefore stay until discovery succeeds.
+- Then with `allowNetwork: true`, unless Pi is offline or has no key for the provider. This step fetches the catalog only when the last successful fetch is more than four hours old, matching Pi's built-in catalogs, or when the caller forces a refresh.
 
-To explicitly fetch a fresh catalog and update the cache, including in offline mode:
+A provider whose startup discovery failed is therefore discovered by Pi's next background refresh, and server-side catalog changes appear at the first interactive start after the cache is four hours old. To fetch every catalog now and update the cache, including in offline mode:
 
 ```text
 /model-discovery-refresh
 ```
 
-Pi's `refreshModels` hook fetches only when Pi passes `allowNetwork: true`. With `allowNetwork: false`, it returns the last successful model list, or throws if none exists so Pi can retain configured fallback models. Initial discovery failure leaves handwritten `models` in `models.json` available as a fallback; catalog fetch or parsing failure during refresh keeps the last successful discovered list. Cache-write failures produce a warning without discarding the successfully fetched models.
+During one startup or manual refresh, providers sharing the same catalog URL, resolved headers and `compat` share a request.
+
+With `pi --offline` or `PI_OFFLINE=1` (also `true` / `yes`), startup never requests the model catalog. It uses a matching cache if available; otherwise it keeps handwritten `models` as a fallback and warns. A missing, invalid, or outdated cache does not trigger a network request in offline mode.
+
+A catalog fetch or parsing failure during a refresh keeps the last successful list. Cache-write failures produce a warning without discarding the fetched models.
 
 ## Advertised metadata
 
@@ -97,13 +103,13 @@ The table lists source precedence. Scalar fields use the first valid value; `inp
 | `cost.cacheRead` | `cost.cacheRead`, `cost.cache_read`, `pricing.cache_read_input_per_million` |
 | `cost.cacheWrite` | `cost.cacheWrite`, `cost.cache_write`, `pricing.cache_creation_input_per_million` |
 
-An `input` array is usable if it contains at least one of the exact strings `text` or `image`. A usable array takes precedence over capabilities: it enables image input only if it contains `image`. Missing, non-array, empty, or unsupported-only values such as `["audio"]` fall through to `capabilities.vision`, then `capabilities.image_input`. A valid `vision: false` wins over `image_input: true`. The result always includes `text`; image support produces `["text", "image"]`, and explicit lack of image support produces `["text"]`. If no source is usable, the default is `["text", "image"]`.
+An `input` array is usable if it contains at least one of the exact strings `text` or `image`. A usable array takes precedence over capabilities: it enables image input only if it contains `image`. Missing, non-array, empty, or unsupported-only values such as `["audio"]` fall through to `capabilities.vision`, then `capabilities.image_input`. A valid `vision: false` wins over `image_input: true`. The result always includes `text`; image support produces `["text", "image"]`, and explicit lack of image support produces `["text"]`. If no source is usable, the default is `["text"]`.
 
 Model `reasoning` and fields under `capabilities` accept booleans or objects with a boolean `supported` property. Provider `compat.reasoning` accepts only a boolean; an object there is ignored. Explicit `false` is preserved and takes precedence over lower-priority sources.
 
 Names must be nonblank strings. Token limits must be positive safe integers; numeric strings, fractions, zero, and negative values are ignored. Costs must be finite, nonnegative numbers in **price per one million tokens**. Zero is valid; numeric strings and prices in other units are not converted. Invalid values fall through to the next alias, then to the default.
 
-When no valid metadata or provider override supplies a value, models default to `contextWindow: 1_000_000`, `maxTokens: 65_536`, `input: ["text", "image"]`, `reasoning: true`, zero cost, `compat.supportsDeveloperRole: false`, and `thinkingLevelMap: { xhigh: null, max: null }`. Token limits are selected independently; `maxTokens` is not clamped to `contextWindow`.
+When no valid metadata or provider override supplies a value, models use the defaults Pi applies to handwritten `models.json` models: `contextWindow: 128_000`, `maxTokens: 16_384`, `input: ["text"]`, `reasoning: false`, and zero cost. Discovered models also default to `compat.supportsDeveloperRole: false` and `thinkingLevelMap: { xhigh: null, max: null }`. A catalog that lists only model IDs, such as OpenAI's, therefore yields conservative text-only models; enable reasoning for a whole provider with `compat.reasoning`, and adjust individual models with `modelOverrides`. Token limits are selected independently; `maxTokens` is not clamped to `contextWindow`, but Pi limits each request's output to the remaining context window.
 
 Provider-level `compat` overrides the default compatibility flags on discovered models. Its `reasoning` and `thinkingLevelMap` fields are extracted into model-level fields; `thinkingLevelMap` entries override the default `xhigh` / `max` values. The extension does not read a model-level `thinkingLevelMap` from the catalog. Pi applies `modelOverrides` by model ID after discovery, so these explicit user overrides take precedence over the discovered metadata.
 
@@ -113,10 +119,11 @@ Requires Node.js 22.19 or later. Install development dependencies and run:
 
 ```sh
 npm ci --ignore-scripts
+npm run typecheck
 npm test
 ```
 
-Tests cover advertised metadata, authentication, cache reuse and invalidation, offline startup, manual refresh, cancellation, failure fallback, Pi model runtime integration, and a local HTTP catalog. They use temporary agent directories and do not modify your Pi configuration or contact external model services. Test dependencies are for local development; the installed extension still runs from one TypeScript file using Pi's own APIs.
+Tests cover advertised metadata and defaults, authentication with configured and Pi-resolved keys, cache reuse and invalidation, concurrent startup, the refresh interval, offline startup, manual refresh, cancellation, failure fallback and recovery through Pi's model runtime refresh, and a local HTTP catalog. They use temporary agent directories and do not modify your Pi configuration or contact external model services. Test dependencies are for local development; the installed extension still runs from one TypeScript file using Pi's own APIs.
 
 ## License
 

@@ -31,8 +31,22 @@ interface DiscoveryProvider {
   compat?: Record<string, unknown>;
 }
 
+interface ProviderState {
+  entry: DiscoveryProvider;
+  config: ProviderConfig;
+  models?: ChatModelConfig[];
+  fetchedAt?: number;
+}
+
+interface CatalogRequest {
+  url: string;
+  headers: Headers;
+  requestKey: string;
+}
+
 interface CacheEntry {
   fingerprint: string;
+  fetchedAt?: number;
   models: ChatModelConfig[];
 }
 
@@ -43,6 +57,12 @@ interface CacheFile {
 
 type Notify = (message: string, level?: "info" | "warning") => void;
 type FetchCache = Map<string, Promise<ChatModelConfig[]>>;
+
+// Bump when parsing or defaults change, so cached models are rebuilt from the catalog.
+const MODEL_FORMAT = 2;
+// Pi refreshes catalogs in the background on every interactive start. Like Pi's built-in
+// catalogs, skip the request when the last successful fetch is this recent.
+const REFRESH_INTERVAL_MS = 4 * 60 * 60 * 1000;
 
 export function asRecord(value: unknown): Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value)
@@ -111,27 +131,28 @@ export function canonicalizeModel(value: unknown): ModelMetadata | undefined {
   };
 }
 
+// Missing metadata uses the defaults Pi applies to handwritten models.json models.
 export function buildModel(model: ModelMetadata, providerCompat?: Record<string, unknown>): ChatModelConfig {
   const { reasoning, thinkingLevelMap, ...compat } = providerCompat ?? {};
   return {
     id: model.id,
     name: model.name ?? model.id,
-    reasoning: typeof reasoning === "boolean" ? reasoning : (model.reasoning ?? true),
+    reasoning: typeof reasoning === "boolean" ? reasoning : (model.reasoning ?? false),
     thinkingLevelMap: {
       xhigh: null,
       max: null,
       ...asRecord(thinkingLevelMap) as ChatModelConfig["thinkingLevelMap"],
     },
     compat: { supportsDeveloperRole: false, ...compat },
-    input: model.input ?? ["text", "image"],
+    input: model.input ?? ["text"],
     cost: {
       input: model.cost?.input ?? 0,
       output: model.cost?.output ?? 0,
       cacheRead: model.cost?.cacheRead ?? 0,
       cacheWrite: model.cost?.cacheWrite ?? 0,
     },
-    contextWindow: model.contextWindow ?? 1_000_000,
-    maxTokens: model.maxTokens ?? 65_536,
+    contextWindow: model.contextWindow ?? 128_000,
+    maxTokens: model.maxTokens ?? 16_384,
   };
 }
 
@@ -199,44 +220,61 @@ export function resolveEnvValue(raw: string): string {
     if (match === "$!") return "!";
     const name = (braced ?? plain) as string;
     const value = process.env[name];
-    if (value === undefined) throw new Error(`Environment variable ${name} is not set.`);
+    // Like Pi, treat an empty variable as unset.
+    if (!value) throw new Error(`Environment variable ${name} is empty or not set.`);
     return value;
   });
 }
 
-function requestConfig(entry: DiscoveryProvider) {
-  const url = entry.modelsUrl || `${entry.baseUrl.replace(/\/+$/, "")}/models`;
-  const headers = new Headers();
-  for (const [name, value] of Object.entries(entry.headers ?? {})) headers.set(name, resolveEnvValue(value));
-  if (entry.apiKey !== undefined) {
-    const key = resolveEnvValue(entry.apiKey);
-    if (key) headers.set("Authorization", `Bearer ${key}`);
-  }
-  // Hash resolved authentication too, so rotating an environment variable invalidates the cache.
-  const requestKey = createHash("sha256").update(JSON.stringify([url, [...headers], entry.compat])).digest("hex");
-  const fingerprint = createHash("sha256").update(JSON.stringify([entry.baseUrl, entry.api, requestKey])).digest("hex");
-  return { url, headers, requestKey, fingerprint };
+function hash(value: unknown): string {
+  return createHash("sha256").update(JSON.stringify(value)).digest("hex");
 }
 
-async function fetchModels(entry: DiscoveryProvider, signal?: AbortSignal): Promise<ChatModelConfig[]> {
-  const { url, headers } = requestConfig(entry);
+function resolveHeaders(entry: DiscoveryProvider): Headers {
+  const headers = new Headers();
+  for (const [name, value] of Object.entries(entry.headers ?? {})) headers.set(name, resolveEnvValue(value));
+  return headers;
+}
+
+// Startup resolves the configured key from the environment. Refreshes pass Pi's effective
+// API key, which also covers !command keys and keys saved with /login.
+function catalogRequest(entry: DiscoveryProvider, apiKey?: string): CatalogRequest {
+  const url = entry.modelsUrl || `${entry.baseUrl.replace(/\/+$/, "")}/models`;
+  const headers = resolveHeaders(entry);
+  const key = apiKey ?? (entry.apiKey === undefined ? undefined : resolveEnvValue(entry.apiKey));
+  if (key) headers.set("Authorization", `Bearer ${key}`);
+  return { url, headers, requestKey: hash([url, [...headers], entry.compat]) };
+}
+
+// Hash resolved values, so rotating an environment variable invalidates the cache. A !command
+// key is identified by its text, so its cache verifies at startup without running the command.
+function fingerprint(entry: DiscoveryProvider): string {
+  const apiKey = entry.apiKey?.startsWith("!") ? entry.apiKey : entry.apiKey && resolveEnvValue(entry.apiKey);
+  return hash([MODEL_FORMAT, entry.baseUrl, entry.api, entry.modelsUrl || "", [...resolveHeaders(entry)], apiKey, entry.compat]);
+}
+
+async function fetchModels(entry: DiscoveryProvider, request: CatalogRequest, signal?: AbortSignal): Promise<ChatModelConfig[]> {
   const timeout = AbortSignal.timeout(5000);
-  const response = await fetch(url, {
-    headers,
+  const response = await fetch(request.url, {
+    headers: request.headers,
     signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
   });
   if (!response.ok) throw new Error(`Model catalog returned HTTP ${response.status}.`);
   return parseModels(await response.json(), entry.compat);
 }
 
-function fetchShared(entry: DiscoveryProvider, cache: FetchCache, signal?: AbortSignal): Promise<ChatModelConfig[]> {
-  const { requestKey } = requestConfig(entry);
-  let pending = cache.get(requestKey);
+function fetchShared(entry: DiscoveryProvider, request: CatalogRequest, cache: FetchCache): Promise<ChatModelConfig[]> {
+  let pending = cache.get(request.requestKey);
   if (!pending) {
-    pending = fetchModels(entry, signal);
-    cache.set(requestKey, pending);
+    pending = fetchModels(entry, request);
+    cache.set(request.requestKey, pending);
   }
   return pending;
+}
+
+function isFresh(fetchedAt: number | undefined): boolean {
+  const age = fetchedAt === undefined ? Infinity : Date.now() - fetchedAt;
+  return age >= 0 && age < REFRESH_INTERVAL_MS;
 }
 
 function errorMessage(error: unknown): string {
@@ -278,12 +316,11 @@ export default async function discoveryExtension(pi: ExtensionAPI): Promise<void
   let writes = Promise.resolve();
 
   // Serialize read/modify/write and replace atomically to avoid truncated cache files.
-  function persist(entry: DiscoveryProvider, models: ChatModelConfig[]): Promise<void> {
-    const fingerprint = requestConfig(entry).fingerprint;
+  function persist({ entry, models, fetchedAt }: ProviderState): Promise<void> {
     writes = writes.then(async () => {
       const latest = await readCache(cachePath, notify);
       Object.defineProperty(latest.providers, entry.id, {
-        value: { fingerprint, models }, enumerable: true, configurable: true, writable: true,
+        value: { fingerprint: fingerprint(entry), fetchedAt, models }, enumerable: true, configurable: true, writable: true,
       });
       const temp = `${cachePath}.${randomUUID()}.tmp`;
       try {
@@ -297,53 +334,60 @@ export default async function discoveryExtension(pi: ExtensionAPI): Promise<void
     return writes;
   }
 
-  const states = new Map<string, { entry: DiscoveryProvider; models?: ChatModelConfig[]; config: ProviderConfig }>();
-  const startupRequests: FetchCache = new Map();
-  for (const entry of providers) {
-    const state: { entry: DiscoveryProvider; models?: ChatModelConfig[]; config: ProviderConfig } = {
-      entry,
-      config: { baseUrl: entry.baseUrl, api: entry.api },
-    };
+  function update(state: ProviderState, models: ChatModelConfig[]): Promise<void> {
+    state.models = models;
+    state.fetchedAt = Date.now();
+    return persist(state);
+  }
+
+  const states = providers.map((entry) => {
+    const state: ProviderState = { entry, config: { baseUrl: entry.baseUrl, api: entry.api } };
     state.config.refreshModels = async (context) => {
-      if (!context.allowNetwork) {
-        if (!state.models?.length) throw new Error("No discovered models are cached; preserving configured fallback models.");
-        return state.models;
-      }
-      const models = await fetchModels(entry, context.signal);
+      // Pi runs this cache-only step before every network step, and a throw would skip the network step.
+      // Returning undefined keeps the current models, including the models.json fallback; [] would clear them.
+      if (!context.allowNetwork) return state.models as ChatModelConfig[];
+      if (state.models && !context.force && isFresh(state.fetchedAt)) return state.models;
+      const apiKey = context.credential?.type === "api_key" ? context.credential.key : undefined;
+      const models = await fetchModels(entry, catalogRequest(entry, apiKey), context.signal);
       context.signal.throwIfAborted();
-      await persist(entry, models);
-      state.models = models;
+      await update(state, models);
       return models;
     };
+    return state;
+  });
+
+  // Start every uncached request before awaiting any, so slow catalogs time out together.
+  const startupRequests: FetchCache = new Map();
+  await Promise.all(states.map(async (state) => {
+    const { entry } = state;
     try {
       const cached = Object.hasOwn(cache.providers, entry.id) ? cache.providers[entry.id] : undefined;
-      if (cached && cached.fingerprint === requestConfig(entry).fingerprint) {
+      if (cached && cached.fingerprint === fingerprint(entry)) {
         try {
           state.models = parseModels(cached.models, entry.compat);
+          state.fetchedAt = typeof cached.fetchedAt === "number" ? cached.fetchedAt : undefined;
         } catch {
           notify(`${entry.id}: invalid cached models; ignoring cache.`);
         }
       }
-      if (!state.models) {
-        if (offline) {
-          notify(`${entry.id}: offline mode; no matching model cache. Keeping configured fallback models.`);
-        } else {
-          state.models = await fetchShared(entry, startupRequests);
-          await persist(entry, state.models);
-        }
+      if (state.models) return;
+      if (offline) {
+        notify(`${entry.id}: offline mode; no matching model cache. Keeping configured fallback models.`);
+      } else if (entry.apiKey?.startsWith("!")) {
+        notify(`${entry.id}: startup does not run the !command API key; Pi's model refresh or /model-discovery-refresh will discover models.`, "info");
+      } else {
+        await update(state, await fetchShared(entry, catalogRequest(entry), startupRequests));
       }
     } catch (error) {
       notify(`${entry.id}: discovery failed: ${errorMessage(error)}`);
     }
+  }));
+
+  for (const state of states) {
     if (state.models) state.config.models = state.models;
-    try {
-      // Let Pi's models.json layer supply authentication, names, headers and modelOverrides.
-      // Omitting models on failure preserves the configured static fallback.
-      pi.registerProvider(entry.id, state.config);
-      states.set(entry.id, state);
-    } catch (error) {
-      notify(`${entry.id}: registration failed: ${errorMessage(error)}`);
-    }
+    // Let Pi's models.json layer supply authentication, names, headers and modelOverrides.
+    // Omitting models on failure preserves the configured static fallback.
+    pi.registerProvider(state.entry.id, state.config);
   }
 
   pi.registerCommand("model-discovery-refresh", {
@@ -351,19 +395,21 @@ export default async function discoveryExtension(pi: ExtensionAPI): Promise<void
     handler: async (_args, ctx) => {
       await ctx.waitForIdle();
       const requests: FetchCache = new Map();
-      let refreshed = 0;
-      for (const state of states.values()) {
+      const results = await Promise.all(states.map(async (state) => {
         try {
-          const models = await fetchShared(state.entry, requests);
+          // Authenticate like chat requests do, with Pi's effective API key for the provider.
+          const apiKey = await ctx.modelRegistry.getApiKeyForProvider(state.entry.id);
+          const models = await fetchShared(state.entry, catalogRequest(state.entry, apiKey), requests);
           pi.registerProvider(state.entry.id, { ...state.config, models });
-          state.models = models;
-          await persist(state.entry, models);
-          refreshed++;
+          await update(state, models);
+          return true;
         } catch (error) {
           ctx.ui.notify(`[model-discovery] ${state.entry.id}: refresh failed: ${errorMessage(error)}`, "warning");
+          return false;
         }
-      }
-      ctx.ui.notify(`[model-discovery] Refreshed ${refreshed}/${states.size} providers.`, refreshed === states.size ? "info" : "warning");
+      }));
+      const refreshed = results.filter(Boolean).length;
+      ctx.ui.notify(`[model-discovery] Refreshed ${refreshed}/${states.length} providers.`, refreshed === states.length ? "info" : "warning");
     },
   });
 }

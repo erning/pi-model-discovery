@@ -18,8 +18,8 @@ test("token limits accept the first valid alias", () => {
   ]);
   assert.deepEqual(models.map((m) => [m.id, m.contextWindow, m.maxTokens]), [
     ["gateway", 1_050_000, 128_000], ["anthropic", 200_000, 32_000], ["groq", 131_072, 32_768],
-    ["mistral", 32_768, 65_536], ["snake", 128_000, 4096], ["camel", 64_000, 2048],
-    ["vllm", 48_000, 1024], ["invalid", 256_000, 8192], ["defaults", 1_000_000, 65_536],
+    ["mistral", 32_768, 16_384], ["snake", 128_000, 4096], ["camel", 64_000, 2048],
+    ["vllm", 48_000, 1024], ["invalid", 256_000, 8192], ["defaults", 128_000, 16_384],
   ]);
 });
 
@@ -34,25 +34,25 @@ test("names and capabilities preserve explicit false", () => {
   ] });
   assert.deepEqual(models.map((m) => [m.name, m.input, m.reasoning]), [
     ["Named", ["text"], false], ["Anthropic", ["text", "image"], true], ["Valid", ["text"], false],
-    ["explicit", ["text"], false], ["image-only", ["text", "image"], true], ["unknown", ["text", "image"], true],
+    ["explicit", ["text"], false], ["image-only", ["text", "image"], false], ["unknown", ["text"], false],
   ]);
 });
 
 test("input uses the first usable source and always retains text", () => {
   const cases = [
-    { id: "empty", input: [], capabilities: { vision: false } },
-    { id: "unsupported", input: ["audio"], capabilities: { image_input: { supported: false } } },
-    { id: "non-array", input: "image", capabilities: { vision: false } },
+    { id: "empty", input: [], capabilities: { vision: true } },
+    { id: "unsupported", input: ["audio"], capabilities: { image_input: { supported: true } } },
+    { id: "non-array", input: "text", capabilities: { vision: true } },
     { id: "vision-first", capabilities: { vision: false, image_input: true } },
-    { id: "invalid-vision", capabilities: { vision: { supported: "false" }, image_input: false } },
+    { id: "invalid-vision", capabilities: { vision: { supported: "false" }, image_input: true } },
     { id: "explicit-text", input: ["audio", "text"], capabilities: { vision: true } },
     { id: "explicit-image", input: ["image"], capabilities: { vision: false } },
-    { id: "no-usable-source", input: ["audio"], capabilities: { vision: "false" } },
+    { id: "no-usable-source", input: ["audio"], capabilities: { vision: "true" } },
   ];
   assert.deepEqual(parseModels(cases).map((m) => [m.id, m.input]), [
-    ["empty", ["text"]], ["unsupported", ["text"]], ["non-array", ["text"]],
-    ["vision-first", ["text"]], ["invalid-vision", ["text"]], ["explicit-text", ["text"]],
-    ["explicit-image", ["text", "image"]], ["no-usable-source", ["text", "image"]],
+    ["empty", ["text", "image"]], ["unsupported", ["text", "image"]], ["non-array", ["text", "image"]],
+    ["vision-first", ["text"]], ["invalid-vision", ["text", "image"]], ["explicit-text", ["text"]],
+    ["explicit-image", ["text", "image"]], ["no-usable-source", ["text"]],
   ]);
 });
 
@@ -60,10 +60,10 @@ test("model reasoning accepts supported objects but provider reasoning requires 
   const entries = [
     { id: "model-first", reasoning: { supported: false }, capabilities: { reasoning: true } },
     { id: "capability-first", reasoning: "true", capabilities: { reasoning: false, thinking: true } },
-    { id: "thinking", capabilities: { reasoning: null, thinking: { supported: false } } },
+    { id: "thinking", capabilities: { reasoning: null, thinking: { supported: true } } },
   ];
-  assert.deepEqual(parseModels(entries).map((m) => m.reasoning), [false, false, false]);
-  assert.deepEqual(parseModels(entries, { reasoning: { supported: true } }).map((m) => m.reasoning), [false, false, false]);
+  assert.deepEqual(parseModels(entries).map((m) => m.reasoning), [false, false, true]);
+  assert.deepEqual(parseModels(entries, { reasoning: { supported: true } }).map((m) => m.reasoning), [false, false, true]);
   assert.deepEqual(parseModels(entries, { reasoning: true }).map((m) => m.reasoning), [true, true, true]);
   const advertised = [{ id: "model", reasoning: true, thinkingLevelMap: { xhigh: "high" } }];
   assert.equal(parseModels(advertised, { reasoning: false })[0].reasoning, false);
@@ -85,8 +85,9 @@ test("costs use finite nonnegative prices per million with explicit costs first"
   ]);
 });
 
-test("provider overrides win and extra thinking tiers require opt-in", () => {
+test("defaults match Pi's models.json; provider overrides win and extra thinking tiers require opt-in", () => {
   const plain = buildModel({ id: "model" });
+  assert.deepEqual([plain.contextWindow, plain.maxTokens, plain.input, plain.reasoning], [128_000, 16_384, ["text"], false]);
   assert.deepEqual(plain.thinkingLevelMap, { xhigh: null, max: null });
   const overridden = buildModel({ id: "model", reasoning: false }, {
     reasoning: true, thinkingLevelMap: { xhigh: "high" }, supportsDeveloperRole: true, supportsReasoningEffort: false,
