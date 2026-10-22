@@ -98,6 +98,17 @@ Capabilities accept booleans or `{ "supported": boolean }` objects, and explicit
 
 Provider-level `compat` is merged into discovered models (`compat.reasoning` and `compat.thinkingLevelMap` are lifted to model fields), and Pi's `modelOverrides` can override individual models by ID.
 
+## Tests
+
+Requires Node.js 22.19 or later. Install development dependencies and run:
+
+```sh
+npm ci --ignore-scripts
+npm test
+```
+
+Tests cover advertised metadata, authentication, cache reuse and invalidation, offline startup, manual refresh, cancellation, failure fallback, Pi model runtime integration, and a local HTTP catalog. They use temporary agent directories and do not modify your Pi configuration or contact external model services. Test dependencies are for local development; the installed extension still runs from one TypeScript file using Pi's own APIs.
+
 ## License
 
 [MIT](./LICENSE)
