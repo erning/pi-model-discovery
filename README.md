@@ -1,32 +1,44 @@
 # pi-model-discovery
 
-Single-file Pi extension (`model-discovery.ts`) that discovers chat models from compatible model catalogs. It reads providers marked with `"discoverModels": true` in `~/.pi/agent/models.json` and registers their models before Pi selects a startup model.
+Pi package with a single-file extension (`model-discovery.ts`) that discovers chat models from compatible model catalogs. It reads providers marked with `"discoverModels": true` in `~/.pi/agent/models.json` and registers their models before Pi selects a startup model.
 
 Derived from [maplezzk/pi-extensions](https://github.com/maplezzk/pi-extensions/tree/main/packages/pi-models-discovery) (`c5cf4ab`) with the advertised metadata improvements from [PR #241](https://github.com/maplezzk/pi-extensions/pull/241) (`858660e`), simplified into a single self-contained file without the configuration panel or i18n.
 
 ## Install
 
-Place `model-discovery.ts` in `~/.pi/agent/extensions/`:
+Install from GitHub:
 
 ```sh
-# Option 1: symlink from a local clone
-ln -s "$PWD/model-discovery.ts" ~/.pi/agent/extensions/model-discovery.ts
-
-# Option 2: copy the file
-cp model-discovery.ts ~/.pi/agent/extensions/
-
-# Option 3: download directly from GitHub
-curl -fsSL https://raw.githubusercontent.com/erning/pi-model-discovery/master/model-discovery.ts \
-  -o ~/.pi/agent/extensions/model-discovery.ts
+pi install git:github.com/erning/pi-model-discovery
 ```
 
-Or load it for a single run:
+Or install from a local clone:
+
+```sh
+pi install .
+```
+
+To try the local extension for a single run:
 
 ```sh
 pi -e ./model-discovery.ts
 ```
 
-If the upstream `pi-models-discovery` package is installed, disable or remove it first so the same providers are not registered twice.
+If you previously copied or symlinked `model-discovery.ts` into `~/.pi/agent/extensions/`, remove that copy or symlink before using the package. Also disable or remove the upstream `pi-models-discovery` extension if installed, so the same providers are not registered twice.
+
+## Update
+
+For the GitHub installation:
+
+```sh
+pi update git:github.com/erning/pi-model-discovery
+```
+
+Without a tag or commit suffix, Pi follows the installed checkout's upstream branch (`master` for this repository). On update, it fetches that branch and compares its commit hash with the installed `HEAD`. If they differ, Pi updates the installed checkout. This does not depend on changing `package.json`'s `version`: a pushed commit on the tracked branch is enough. Run `/reload` in an active Pi session after updating.
+
+Local-path installations use the working files directly; use `git pull` in the clone and `/reload` to load changes.
+
+To pin a release after a tag exists, install `git:github.com/erning/pi-model-discovery@v1.0.0`. A pinned tag or commit stays on that ref; updates do not select a newer release automatically.
 
 ## Configure
 
