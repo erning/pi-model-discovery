@@ -38,6 +38,38 @@ test("names and capabilities preserve explicit false", () => {
   ]);
 });
 
+test("input uses the first usable source and always retains text", () => {
+  const cases = [
+    { id: "empty", input: [], capabilities: { vision: false } },
+    { id: "unsupported", input: ["audio"], capabilities: { image_input: { supported: false } } },
+    { id: "non-array", input: "image", capabilities: { vision: false } },
+    { id: "vision-first", capabilities: { vision: false, image_input: true } },
+    { id: "invalid-vision", capabilities: { vision: { supported: "false" }, image_input: false } },
+    { id: "explicit-text", input: ["audio", "text"], capabilities: { vision: true } },
+    { id: "explicit-image", input: ["image"], capabilities: { vision: false } },
+    { id: "no-usable-source", input: ["audio"], capabilities: { vision: "false" } },
+  ];
+  assert.deepEqual(parseModels(cases).map((m) => [m.id, m.input]), [
+    ["empty", ["text"]], ["unsupported", ["text"]], ["non-array", ["text"]],
+    ["vision-first", ["text"]], ["invalid-vision", ["text"]], ["explicit-text", ["text"]],
+    ["explicit-image", ["text", "image"]], ["no-usable-source", ["text", "image"]],
+  ]);
+});
+
+test("model reasoning accepts supported objects but provider reasoning requires a boolean", () => {
+  const entries = [
+    { id: "model-first", reasoning: { supported: false }, capabilities: { reasoning: true } },
+    { id: "capability-first", reasoning: "true", capabilities: { reasoning: false, thinking: true } },
+    { id: "thinking", capabilities: { reasoning: null, thinking: { supported: false } } },
+  ];
+  assert.deepEqual(parseModels(entries).map((m) => m.reasoning), [false, false, false]);
+  assert.deepEqual(parseModels(entries, { reasoning: { supported: true } }).map((m) => m.reasoning), [false, false, false]);
+  assert.deepEqual(parseModels(entries, { reasoning: true }).map((m) => m.reasoning), [true, true, true]);
+  const advertised = [{ id: "model", reasoning: true, thinkingLevelMap: { xhigh: "high" } }];
+  assert.equal(parseModels(advertised, { reasoning: false })[0].reasoning, false);
+  assert.deepEqual(parseModels(advertised)[0].thinkingLevelMap, { xhigh: null, max: null });
+});
+
 test("costs use finite nonnegative prices per million with explicit costs first", () => {
   const models = parseModels([
     { id: "priced", pricing: { input_per_million: 1.36, output_per_million: 6.8, cache_read_input_per_million: 0.068, cache_creation_input_per_million: 1.7 } },

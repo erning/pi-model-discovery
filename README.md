@@ -42,7 +42,7 @@ To pin a release after a tag exists, install `git:github.com/erning/pi-model-dis
 
 ## Configure
 
-Add `"discoverModels": true` to a provider in `~/.pi/agent/models.json`:
+Add `"discoverModels": true` to a provider in `<agent-dir>/models.json`. The agent directory defaults to `~/.pi/agent`; `PI_CODING_AGENT_DIR` overrides it for both configuration and cache files:
 
 ```json
 {
@@ -58,15 +58,18 @@ Add `"discoverModels": true` to a provider in `~/.pi/agent/models.json`:
 }
 ```
 
-- `baseUrl` and `api` are required.
-- Discovery fetches `GET {baseUrl}/models` by default (trailing slashes stripped), or `modelsUrl` when set to a full URL.
-- Both `{ "data": [{ "id": "model-id" }] }` and a top-level array are accepted.
-- Discovery sends resolved `headers` and `Authorization: Bearer <apiKey>` when `apiKey` is set. Literal keys, `$NAME` / `${NAME}` interpolation, and `$$` / `$!` escapes are supported; `!command` credentials are not executed during discovery.
-- After editing `models.json`, run `/reload` inside Pi.
+- `baseUrl` and `api` must be nonempty strings. Use an API supported by Pi, such as `openai-completions`.
+- Discovery fetches `GET {baseUrl}/models` by default (trailing slashes stripped). A nonempty string `modelsUrl` is used as-is instead; supply a complete URL. An empty or non-string `modelsUrl` uses the default endpoint. Requests time out after five seconds.
+- Both `{ "data": [{ "id": "model-id" }] }` and a top-level array are accepted. Entries without a nonblank string `id` are skipped; a response with no valid entries fails discovery. All accepted entries are registered as chat models.
+- Discovery resolves the provider's `headers` and optional `apiKey`. A nonempty resolved key sets `Authorization: Bearer <apiKey>`, replacing any configured Authorization header. An omitted or empty key leaves that header unchanged. The same credentials are sent to `modelsUrl` when configured.
+- Keys and header values support literals, `$NAME` / `${NAME}` interpolation, and `$$` / `$!` escapes. Missing environment variables and leading `!command` values fail discovery. Discovery does not read credentials from Pi's login storage; Pi handles chat authentication separately. Unauthenticated catalogs can omit `apiKey`, though Pi may still require a dummy key to make a local model selectable.
+- The extension reads but does not rewrite `models.json`; BOM, `//` comments, and trailing commas are supported. After editing discovery configuration, run `/reload`. The manual refresh command uses the configuration captured when the extension loaded.
 
 ## Cache and refresh
 
-Discovered models are cached in `~/.pi/agent/cache/pi-model-discovery.json`. Subsequent startups with unchanged configuration load from cache without network requests. Endpoint, API, compatibility settings, or resolved credential changes invalidate the cache automatically.
+Discovered models are cached per provider ID in `<agent-dir>/cache/pi-model-discovery.json`. A valid cache with a matching fingerprint is loaded at startup without a catalog request. The fingerprint includes `baseUrl`, API type, effective catalog URL, resolved request headers (including the API key), and provider `compat`. Changes to those values invalidate the cache; changing only a provider's name or `modelOverrides` does not. Credentials must still resolve successfully to verify the fingerprint, even when offline.
+
+There is no time-based expiration or periodic refresh. Changes to a server's catalog alone do not invalidate the cache. During one startup or manual refresh, providers sharing the same catalog URL, resolved headers, and `compat` share a request. Each online `refreshModels` call makes its own request.
 
 With `pi --offline` or `PI_OFFLINE=1` (also `true` / `yes`), startup never requests the model catalog. It uses a matching cache if available; otherwise it keeps handwritten `models` as a fallback and warns. A missing, invalid, or outdated cache does not trigger a network request in offline mode.
 
@@ -76,27 +79,33 @@ To explicitly fetch a fresh catalog and update the cache, including in offline m
 /model-discovery-refresh
 ```
 
-Pi's `refreshModels` hook fetches only when Pi passes `allowNetwork: true`; otherwise it returns the last successful model list. If initial discovery fails, handwritten `models` in `models.json` are preserved as a fallback; if a refresh fails, the last successful model list is kept.
+Pi's `refreshModels` hook fetches only when Pi passes `allowNetwork: true`. With `allowNetwork: false`, it returns the last successful model list, or throws if none exists so Pi can retain configured fallback models. Initial discovery failure leaves handwritten `models` in `models.json` available as a fallback; catalog fetch or parsing failure during refresh keeps the last successful discovered list. Cache-write failures produce a warning without discarding the successfully fetched models.
 
 ## Advertised metadata
 
-The first valid value in each row wins:
+The table lists source precedence. Scalar fields use the first valid value; `input` is derived from the first usable source as described below.
 
 | Pi field | Catalog fields in precedence order |
 | --- | --- |
 | `name` | `name`, `display_name`, model ID |
 | `contextWindow` | `context_window`, `contextWindow`, `max_model_len`, `context_length`, `max_context_length`, `max_input_tokens` |
 | `maxTokens` | `max_tokens`, `maxTokens`, `max_output_tokens`, `max_completion_tokens` |
-| Image input | Explicit `input` containing `text` and/or `image`, then `capabilities.vision`, then `capabilities.image_input` |
+| `input` | Usable `input` array, then `capabilities.vision`, then `capabilities.image_input` |
 | `reasoning` | Provider `compat.reasoning`, model `reasoning`, `capabilities.reasoning`, `capabilities.thinking` |
 | `cost.input` | `cost.input`, `pricing.input_per_million` |
 | `cost.output` | `cost.output`, `pricing.output_per_million` |
 | `cost.cacheRead` | `cost.cacheRead`, `cost.cache_read`, `pricing.cache_read_input_per_million` |
 | `cost.cacheWrite` | `cost.cacheWrite`, `cost.cache_write`, `pricing.cache_creation_input_per_million` |
 
-Capabilities accept booleans or `{ "supported": boolean }` objects, and explicit `false` is preserved. When metadata is absent, models default to `contextWindow: 1_000_000`, `maxTokens: 65_536`, `input: ["text", "image"]`, `reasoning: true`, zero cost, `compat.supportsDeveloperRole: false`, and `thinkingLevelMap: { xhigh: null, max: null }`.
+An `input` array is usable if it contains at least one of the exact strings `text` or `image`. A usable array takes precedence over capabilities: it enables image input only if it contains `image`. Missing, non-array, empty, or unsupported-only values such as `["audio"]` fall through to `capabilities.vision`, then `capabilities.image_input`. A valid `vision: false` wins over `image_input: true`. The result always includes `text`; image support produces `["text", "image"]`, and explicit lack of image support produces `["text"]`. If no source is usable, the default is `["text", "image"]`.
 
-Provider-level `compat` is merged into discovered models (`compat.reasoning` and `compat.thinkingLevelMap` are lifted to model fields), and Pi's `modelOverrides` can override individual models by ID.
+Model `reasoning` and fields under `capabilities` accept booleans or objects with a boolean `supported` property. Provider `compat.reasoning` accepts only a boolean; an object there is ignored. Explicit `false` is preserved and takes precedence over lower-priority sources.
+
+Names must be nonblank strings. Token limits must be positive safe integers; numeric strings, fractions, zero, and negative values are ignored. Costs must be finite, nonnegative numbers in **price per one million tokens**. Zero is valid; numeric strings and prices in other units are not converted. Invalid values fall through to the next alias, then to the default.
+
+When no valid metadata or provider override supplies a value, models default to `contextWindow: 1_000_000`, `maxTokens: 65_536`, `input: ["text", "image"]`, `reasoning: true`, zero cost, `compat.supportsDeveloperRole: false`, and `thinkingLevelMap: { xhigh: null, max: null }`. Token limits are selected independently; `maxTokens` is not clamped to `contextWindow`.
+
+Provider-level `compat` overrides the default compatibility flags on discovered models. Its `reasoning` and `thinkingLevelMap` fields are extracted into model-level fields; `thinkingLevelMap` entries override the default `xhigh` / `max` values. The extension does not read a model-level `thinkingLevelMap` from the catalog. Pi applies `modelOverrides` by model ID after discovery, so these explicit user overrides take precedence over the discovered metadata.
 
 ## Tests
 

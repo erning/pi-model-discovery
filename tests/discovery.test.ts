@@ -96,6 +96,31 @@ test("custom catalog URLs receive resolved auth and headers; cache contains no c
   assert.equal("apiKey" in h.registrations.get("one")!, false);
 });
 
+test("provider names and model overrides do not invalidate cache; catalogs have no automatic expiry", async (t) => {
+  const h = await harness(t);
+  await h.configure({ one: provider });
+  await h.start();
+  h.setPayload([{ id: "new-server-model" }]);
+  await h.configure({ one: { ...provider, name: "Renamed", modelOverrides: { model: { maxTokens: 1024 } } } });
+  await h.start();
+  assert.equal(h.requests.length, 1);
+  assert.equal(h.registrations.get("one")!.models?.[0].id, "model");
+  await h.refresh();
+  assert.equal(h.requests.length, 2);
+  assert.equal(h.registrations.get("one")!.models?.[0].id, "new-server-model");
+});
+
+test("only a nonempty API key replaces the configured Authorization header", async (t) => {
+  const h = await harness(t);
+  for (const apiKey of [undefined, "", "replacement-key"]) {
+    await h.configure({ one: { ...provider, apiKey, headers: { authorization: "Custom credential" } } });
+    await h.start();
+    await h.refresh();
+    assert.equal(h.requests.at(-1)!.headers.get("Authorization"),
+      apiKey ? "Bearer replacement-key" : "Custom credential");
+  }
+});
+
 test("online hook and command refresh update disk; command shares requests", async (t) => {
   const h = await harness(t);
   await h.configure({ one: provider, two: provider });
