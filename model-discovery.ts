@@ -59,7 +59,7 @@ type Notify = (message: string, level?: "info" | "warning") => void;
 type FetchCache = Map<string, Promise<ChatModelConfig[]>>;
 
 // Bump when parsing or defaults change, so cached models are rebuilt from the catalog.
-const MODEL_FORMAT = 2;
+const MODEL_FORMAT = 3;
 // Pi refreshes catalogs in the background on every interactive start. Like Pi's built-in
 // catalogs, skip the request when the last successful fetch is this recent.
 const REFRESH_INTERVAL_MS = 4 * 60 * 60 * 1000;
@@ -87,11 +87,19 @@ function capabilitySupported(value: unknown): boolean | undefined {
   return typeof supported === "boolean" ? supported : undefined;
 }
 
-// Chat models always accept text; advertised modalities determine image support.
-function modelInput(input: unknown, capabilities: Record<string, unknown>): ChatModelConfig["input"] | undefined {
-  const image = Array.isArray(input) && (input.includes("text") || input.includes("image"))
-    ? input.includes("image")
-    : capabilitySupported(capabilities.vision) ?? capabilitySupported(capabilities.image_input);
+// Chat models always accept text; a modality list is usable if it names text or image.
+function inputFrom(modalities: unknown): ChatModelConfig["input"] | undefined {
+  if (!Array.isArray(modalities) || !(modalities.includes("text") || modalities.includes("image"))) return undefined;
+  return modalities.includes("image") ? ["text", "image"] : ["text"];
+}
+
+function modelInput(raw: Record<string, unknown>, capabilities: Record<string, unknown>): ChatModelConfig["input"] | undefined {
+  // `modalities.input` is Vercel's and magpie's form, `architecture.input_modalities` OpenRouter's.
+  const listed = inputFrom(raw.input)
+    ?? inputFrom(asRecord(raw.modalities).input)
+    ?? inputFrom(asRecord(raw.architecture).input_modalities);
+  if (listed) return listed;
+  const image = capabilitySupported(capabilities.vision) ?? capabilitySupported(capabilities.image_input);
   return image === undefined ? undefined : image ? ["text", "image"] : ["text"];
 }
 
@@ -118,7 +126,7 @@ export function canonicalizeModel(value: unknown): ModelMetadata | undefined {
       raw.max_output_tokens,
       raw.max_completion_tokens,
     ),
-    input: modelInput(raw.input, capabilities),
+    input: modelInput(raw, capabilities),
     reasoning: capabilitySupported(raw.reasoning)
       ?? capabilitySupported(capabilities.reasoning)
       ?? capabilitySupported(capabilities.thinking),
@@ -131,9 +139,11 @@ export function canonicalizeModel(value: unknown): ModelMetadata | undefined {
   };
 }
 
-// Missing metadata uses the defaults Pi applies to handwritten models.json models.
+// Missing metadata uses the defaults Pi applies to handwritten models.json models. Provider-level
+// `compat.input` covers gateways that add image support the catalog doesn't list, such as
+// magpie describing images to text-only models.
 export function buildModel(model: ModelMetadata, providerCompat?: Record<string, unknown>): ChatModelConfig {
-  const { reasoning, thinkingLevelMap, ...compat } = providerCompat ?? {};
+  const { reasoning, thinkingLevelMap, input, ...compat } = providerCompat ?? {};
   return {
     id: model.id,
     name: model.name ?? model.id,
@@ -144,7 +154,7 @@ export function buildModel(model: ModelMetadata, providerCompat?: Record<string,
       ...asRecord(thinkingLevelMap) as ChatModelConfig["thinkingLevelMap"],
     },
     compat: { supportsDeveloperRole: false, ...compat },
-    input: model.input ?? ["text"],
+    input: inputFrom(input) ?? model.input ?? ["text"],
     cost: {
       input: model.cost?.input ?? 0,
       output: model.cost?.output ?? 0,

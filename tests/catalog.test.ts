@@ -48,12 +48,35 @@ test("input uses the first usable source and always retains text", () => {
     { id: "explicit-text", input: ["audio", "text"], capabilities: { vision: true } },
     { id: "explicit-image", input: ["image"], capabilities: { vision: false } },
     { id: "no-usable-source", input: ["audio"], capabilities: { vision: "true" } },
+    { id: "modalities", modalities: { input: ["text", "image", "pdf"], output: ["text"] }, capabilities: { vision: false } },
+    { id: "modalities-text", modalities: { input: ["text"] }, capabilities: { vision: true } },
+    { id: "openrouter", architecture: { input_modalities: ["image", "text"] } },
+    { id: "input-first", input: ["text"], modalities: { input: ["text", "image"] } },
+    { id: "modalities-first", modalities: { input: ["text"] }, architecture: { input_modalities: ["text", "image"] } },
+    { id: "unusable-modalities", modalities: { input: ["audio"] }, architecture: { input_modalities: ["text", "image"] } },
   ];
   assert.deepEqual(parseModels(cases).map((m) => [m.id, m.input]), [
     ["empty", ["text", "image"]], ["unsupported", ["text", "image"]], ["non-array", ["text", "image"]],
     ["vision-first", ["text"]], ["invalid-vision", ["text", "image"]], ["explicit-text", ["text"]],
     ["explicit-image", ["text", "image"]], ["no-usable-source", ["text"]],
+    ["modalities", ["text", "image"]], ["modalities-text", ["text"]], ["openrouter", ["text", "image"]],
+    ["input-first", ["text"]], ["modalities-first", ["text"]], ["unusable-modalities", ["text", "image"]],
   ]);
+});
+
+test("provider compat.input overrides advertised input, as for a magpie gateway", () => {
+  // Shaped like magpie's /v1/models: k3 sees images itself; magpie describes images to glm-5.3.
+  const magpie = [
+    { id: "kimi-code-cn/k3", display_name: "K3", context_window: 1_000_000, max_output_tokens: 128_000, reasoning: true,
+      modalities: { input: ["text", "image", "video"], output: ["text"] } },
+    { id: "zhipu/glm-5.3", display_name: "GLM-5.3", reasoning: true, modalities: { input: ["text"], output: ["text"] } },
+  ];
+  assert.deepEqual(parseModels(magpie).map((m) => m.input), [["text", "image"], ["text"]]);
+  const described = parseModels(magpie, { input: ["text", "image"] });
+  assert.deepEqual(described.map((m) => m.input), [["text", "image"], ["text", "image"]]);
+  assert.equal("input" in described[0].compat!, false);
+  assert.deepEqual(parseModels(magpie, { input: ["text"] }).map((m) => m.input), [["text"], ["text"]]);
+  assert.deepEqual(parseModels(magpie, { input: "image" }).map((m) => m.input), [["text", "image"], ["text"]]);
 });
 
 test("model reasoning accepts supported objects but provider reasoning requires a boolean", () => {

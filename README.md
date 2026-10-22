@@ -96,22 +96,34 @@ The table lists source precedence. Scalar fields use the first valid value; `inp
 | `name` | `name`, `display_name`, model ID |
 | `contextWindow` | `context_window`, `contextWindow`, `max_model_len`, `context_length`, `max_context_length`, `max_input_tokens` |
 | `maxTokens` | `max_tokens`, `maxTokens`, `max_output_tokens`, `max_completion_tokens` |
-| `input` | Usable `input` array, then `capabilities.vision`, then `capabilities.image_input` |
+| `input` | Provider `compat.input`, then the first usable list of `input`, `modalities.input`, `architecture.input_modalities`, then `capabilities.vision`, then `capabilities.image_input` |
 | `reasoning` | Provider `compat.reasoning`, model `reasoning`, `capabilities.reasoning`, `capabilities.thinking` |
 | `cost.input` | `cost.input`, `pricing.input_per_million` |
 | `cost.output` | `cost.output`, `pricing.output_per_million` |
 | `cost.cacheRead` | `cost.cacheRead`, `cost.cache_read`, `pricing.cache_read_input_per_million` |
 | `cost.cacheWrite` | `cost.cacheWrite`, `cost.cache_write`, `pricing.cache_creation_input_per_million` |
 
-An `input` array is usable if it contains at least one of the exact strings `text` or `image`. A usable array takes precedence over capabilities: it enables image input only if it contains `image`. Missing, non-array, empty, or unsupported-only values such as `["audio"]` fall through to `capabilities.vision`, then `capabilities.image_input`. A valid `vision: false` wins over `image_input: true`. The result always includes `text`; image support produces `["text", "image"]`, and explicit lack of image support produces `["text"]`. If no source is usable, the default is `["text"]`.
+Catalogs list input modalities in different places: a top-level `input` array, `modalities.input` (Vercel's AI Gateway, magpie), or `architecture.input_modalities` (OpenRouter). A list is usable if it is an array containing at least one of the exact strings `text` or `image`; the first usable one, in that order, decides, and enables image input only if it contains `image`. Missing, non-array, empty, or unsupported-only lists such as `["audio"]` fall through to the next one, then to `capabilities.vision`, then `capabilities.image_input`. A valid `vision: false` wins over `image_input: true`. The result always includes `text`; image support produces `["text", "image"]`, and explicit lack of image support produces `["text"]`. If no source is usable, the default is `["text"]`.
+
+Provider `compat.input` takes a list in the same form and applies it to every discovered model, ahead of what the catalog says. It is for gateways that accept images for models whose catalog entries are text-only. For example, magpie with Image recognition on describes images to models that cannot see them, but its `/v1/models` lists only each model's own modalities:
+
+```json
+"magpie": {
+  "baseUrl": "http://127.0.0.1:3425/v1",
+  "api": "openai-completions",
+  "apiKey": "magpie",
+  "discoverModels": true,
+  "compat": { "input": ["text", "image"] }
+}
+```
 
 Model `reasoning` and fields under `capabilities` accept booleans or objects with a boolean `supported` property. Provider `compat.reasoning` accepts only a boolean; an object there is ignored. Explicit `false` is preserved and takes precedence over lower-priority sources.
 
 Names must be nonblank strings. Token limits must be positive safe integers; numeric strings, fractions, zero, and negative values are ignored. Costs must be finite, nonnegative numbers in **price per one million tokens**. Zero is valid; numeric strings and prices in other units are not converted. Invalid values fall through to the next alias, then to the default.
 
-When no valid metadata or provider override supplies a value, models use the defaults Pi applies to handwritten `models.json` models: `contextWindow: 128_000`, `maxTokens: 16_384`, `input: ["text"]`, `reasoning: false`, and zero cost. Discovered models also default to `compat.supportsDeveloperRole: false` and `thinkingLevelMap: { xhigh: null, max: null }`. A catalog that lists only model IDs, such as OpenAI's, therefore yields conservative text-only models; enable reasoning for a whole provider with `compat.reasoning`, and adjust individual models with `modelOverrides`. Token limits are selected independently; `maxTokens` is not clamped to `contextWindow`, but Pi limits each request's output to the remaining context window.
+When no valid metadata or provider override supplies a value, models use the defaults Pi applies to handwritten `models.json` models: `contextWindow: 128_000`, `maxTokens: 16_384`, `input: ["text"]`, `reasoning: false`, and zero cost. Discovered models also default to `compat.supportsDeveloperRole: false` and `thinkingLevelMap: { xhigh: null, max: null }`. A catalog that lists only model IDs, such as OpenAI's, therefore yields conservative text-only models; enable images or reasoning for a whole provider with `compat.input` or `compat.reasoning`, and adjust individual models with `modelOverrides`. Token limits are selected independently; `maxTokens` is not clamped to `contextWindow`, but Pi limits each request's output to the remaining context window.
 
-Provider-level `compat` overrides the default compatibility flags on discovered models. Its `reasoning` and `thinkingLevelMap` fields are extracted into model-level fields; `thinkingLevelMap` entries override the default `xhigh` / `max` values. The extension does not read a model-level `thinkingLevelMap` from the catalog. Pi applies `modelOverrides` by model ID after discovery, so these explicit user overrides take precedence over the discovered metadata.
+Provider-level `compat` overrides the default compatibility flags on discovered models. Its `input`, `reasoning` and `thinkingLevelMap` fields are extracted into model-level fields; `thinkingLevelMap` entries override the default `xhigh` / `max` values. The extension does not read a model-level `thinkingLevelMap` from the catalog. Pi applies `modelOverrides` by model ID after discovery, so these explicit user overrides take precedence over the discovered metadata.
 
 ## Tests
 
