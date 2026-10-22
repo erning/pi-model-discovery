@@ -56,13 +56,15 @@ Add `"discoverModels": true` to a provider in `~/.pi/agent/models.json`:
 
 Discovered models are cached in `~/.pi/agent/cache/pi-model-discovery.json`. Subsequent startups with unchanged configuration load from cache without network requests. Endpoint, API, compatibility settings, or resolved credential changes invalidate the cache automatically.
 
-To force a refresh and update the cache:
+With `pi --offline` or `PI_OFFLINE=1` (also `true` / `yes`), startup never requests the model catalog. It uses a matching cache if available; otherwise it keeps handwritten `models` as a fallback and warns. A missing, invalid, or outdated cache does not trigger a network request in offline mode.
+
+To explicitly fetch a fresh catalog and update the cache, including in offline mode:
 
 ```text
 /model-discovery-refresh
 ```
 
-Opening `/model` also triggers Pi's `refreshModels` hook. If initial discovery fails, handwritten `models` in `models.json` are preserved as a fallback; if a refresh fails, the last successful model list is kept.
+Pi's `refreshModels` hook fetches only when Pi passes `allowNetwork: true`; otherwise it returns the last successful model list. If initial discovery fails, handwritten `models` in `models.json` are preserved as a fallback; if a refresh fails, the last successful model list is kept.
 
 ## Advertised metadata
 

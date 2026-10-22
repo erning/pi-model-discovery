@@ -269,6 +269,8 @@ export default async function discoveryExtension(pi: ExtensionAPI): Promise<void
   });
   pi.on("session_shutdown", () => { showNotice = undefined; });
 
+  // Pi normalizes --offline to PI_OFFLINE=1 before loading extensions.
+  const offline = /^(1|true|yes)$/i.test(process.env.PI_OFFLINE ?? "");
   const agentDir = getAgentDir();
   const cachePath = join(agentDir, "cache", "pi-model-discovery.json");
   const providers = await readProviders(join(agentDir, "models.json"), notify);
@@ -319,12 +321,16 @@ export default async function discoveryExtension(pi: ExtensionAPI): Promise<void
         try {
           state.models = parseModels(cached.models, entry.compat);
         } catch {
-          notify(`${entry.id}: invalid cached models; rediscovering.`);
+          notify(`${entry.id}: invalid cached models; ignoring cache.`);
         }
       }
       if (!state.models) {
-        state.models = await fetchShared(entry, startupRequests);
-        await persist(entry, state.models);
+        if (offline) {
+          notify(`${entry.id}: offline mode; no matching model cache. Keeping configured fallback models.`);
+        } else {
+          state.models = await fetchShared(entry, startupRequests);
+          await persist(entry, state.models);
+        }
       }
     } catch (error) {
       notify(`${entry.id}: discovery failed: ${errorMessage(error)}`);
