@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { createServer } from "node:http";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
-import type { RefreshModelsContext } from "@earendil-works/pi-ai";
+import { getSupportedThinkingLevels, type Api, type Model, type RefreshModelsContext } from "@earendil-works/pi-ai";
 import { ModelRuntime, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, type ProviderConfig } from "@earendil-works/pi-coding-agent";
 import extension, { resolveEnvValue } from "../model-discovery.ts";
 
@@ -80,6 +81,36 @@ test("startup shares requests, then cache and offline refresh retain advertised 
   assert.deepEqual(await h.registrations.get("one")!.refreshModels!(refreshContext(false)), first);
   assert.equal(h.requests.length, 1);
   assert.equal(h.notices.length, 0);
+});
+
+test("thinking levels survive startup, cache reuse and refresh; old model formats are refetched", async (t) => {
+  const h = await harness(t);
+  await h.configure({ one: provider });
+  h.setPayload([{ id: "kimi-code-cn/k3.1-pro", reasoning: true, reasoning_levels: ["low", "high", "max"] }]);
+  const levels = () => getSupportedThinkingLevels(h.registrations.get("one")!.models![0] as Model<Api>);
+  await h.start();
+  assert.deepEqual(levels(), ["low", "high", "max"]);
+  await h.start();
+  assert.equal(h.requests.length, 1);
+  assert.deepEqual(levels(), ["low", "high", "max"]);
+
+  const cache = JSON.parse(await h.cache());
+  // Version 3 discarded advertised tiers and cached only these default mappings.
+  cache.providers.one.fingerprint = createHash("sha256")
+    .update(JSON.stringify([3, provider.baseUrl, provider.api, "", [], undefined, {}])).digest("hex");
+  cache.providers.one.models[0].thinkingLevelMap = { xhigh: null, max: null };
+  await writeFile(h.cachePath, JSON.stringify(cache));
+  await h.start();
+  assert.equal(h.requests.length, 2);
+  assert.deepEqual(levels(), ["low", "high", "max"]);
+
+  h.setPayload([{ id: "kimi-code-cn/k3.1-pro", reasoning: true,
+    supported_reasoning_levels: [{ effort: "high" }, { effort: "max" }] }]);
+  await h.refresh();
+  assert.deepEqual(levels(), ["high", "max"]);
+  await h.start();
+  assert.equal(h.requests.length, 3);
+  assert.deepEqual(levels(), ["high", "max"]);
 });
 
 test("custom catalog URLs receive resolved auth and headers; cache contains no credentials", async (t) => {
@@ -356,7 +387,8 @@ test("Pi's online refresh recovers from failed startup discovery", async (t) => 
 test("real Pi runtime composes discovered models with auth, model overrides and static fallback", async (t) => {
   const h = await harness(t);
   await h.configure({
-    discovered: { ...provider, name: "Gateway", apiKey: "test-token", headers: { "X-Test": "header" }, modelOverrides: { model: { maxTokens: 4096 } } },
+    discovered: { ...provider, name: "Gateway", apiKey: "test-token", headers: { "X-Test": "header" },
+      modelOverrides: { model: { maxTokens: 4096, thinkingLevelMap: { max: null, medium: "high" } } } },
     broken: { ...provider, apiKey: "!unsupported", models: [{ id: "fallback" }] },
   });
   const runtime = await ModelRuntime.create({
@@ -364,10 +396,13 @@ test("real Pi runtime composes discovered models with auth, model overrides and 
     modelsStorePath: join(h.dir, "models-store.json"), allowModelNetwork: false,
   });
   const pi = { ...h.pi, registerProvider: (id: string, config: ProviderConfig) => runtime.registerProvider(id, config) } as ExtensionAPI;
+  h.setPayload([{ id: "model", reasoning: true, reasoning_levels: ["low", "high", "max"] }]);
   await extension(pi);
   await runtime.refresh({ allowNetwork: false });
   const model = runtime.getModel("discovered", "model")!;
   assert.equal(model.maxTokens, 4096);
+  assert.deepEqual(getSupportedThinkingLevels(model), ["low", "medium", "high"]);
+  assert.equal(model.thinkingLevelMap?.medium, "high");
   assert.equal(runtime.getCompatibilityRequestConfig(model).headers?.["X-Test"], "header");
   assert.ok(await runtime.getAuth("discovered"));
   assert.ok(runtime.getModel("broken", "fallback"));

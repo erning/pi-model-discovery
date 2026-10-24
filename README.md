@@ -98,6 +98,7 @@ The table lists source precedence. Scalar fields use the first valid value; `inp
 | `maxTokens` | `max_tokens`, `maxTokens`, `max_output_tokens`, `max_completion_tokens` |
 | `input` | Provider `compat.input`, then the first usable list of `input`, `modalities.input`, `architecture.input_modalities`, then `capabilities.vision`, then `capabilities.image_input` |
 | `reasoning` | Provider `compat.reasoning`, model `reasoning`, `capabilities.reasoning`, `capabilities.thinking` |
+| `thinkingLevelMap` | Provider `compat.thinkingLevelMap` entries, model `thinkingLevelMap` entries, then the first usable list of `reasoning_levels` or `supported_reasoning_levels[].effort` |
 | `cost.input` | `cost.input`, `pricing.input_per_million` |
 | `cost.output` | `cost.output`, `pricing.output_per_million` |
 | `cost.cacheRead` | `cost.cacheRead`, `cost.cache_read`, `pricing.cache_read_input_per_million` |
@@ -119,11 +120,15 @@ Provider `compat.input` takes a list in the same form and applies it to every di
 
 Model `reasoning` and fields under `capabilities` accept booleans or objects with a boolean `supported` property. Provider `compat.reasoning` accepts only a boolean; an object there is ignored. Explicit `false` is preserved and takes precedence over lower-priority sources.
 
+Thinking levels come from `reasoning_levels` (an array of strings), or from `supported_reasoning_levels` (an array of objects with an `effort` string) when the first list is unusable. A list is usable if it contains at least one recognized value: `off`, `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`. Listed levels map to their own API values; `none` maps Pi's `off` level to the API value `none`. Unlisted levels are set to `null`, so Pi hides them and skips them when cycling. For example, K3.1 Pro's `["low", "high", "max"]` exposes exactly those three levels. Empty, malformed, or unrecognized-only lists retain the defaults below. Lists do not enable reasoning on their own; `reasoning` still controls whether thinking is available.
+
+A model-level `thinkingLevelMap` overrides the list per entry and is also preserved when loading cached models. Recognized Pi keys accept nonblank strings or `null`; invalid entries are ignored. Provider `compat.thinkingLevelMap` entries override the resulting model mapping.
+
 Names must be nonblank strings. Token limits must be positive safe integers; numeric strings, fractions, zero, and negative values are ignored. Costs must be finite, nonnegative numbers in **price per one million tokens**. Zero is valid; numeric strings and prices in other units are not converted. Invalid values fall through to the next alias, then to the default.
 
-When no valid metadata or provider override supplies a value, models use the defaults Pi applies to handwritten `models.json` models: `contextWindow: 128_000`, `maxTokens: 16_384`, `input: ["text"]`, `reasoning: false`, and zero cost. Discovered models also default to `compat.supportsDeveloperRole: false` and `thinkingLevelMap: { xhigh: null, max: null }`. A catalog that lists only model IDs, such as OpenAI's, therefore yields conservative text-only models; enable images or reasoning for a whole provider with `compat.input` or `compat.reasoning`, and adjust individual models with `modelOverrides`. Token limits are selected independently; `maxTokens` is not clamped to `contextWindow`, but Pi limits each request's output to the remaining context window.
+When no valid metadata or provider override supplies a value, models use the defaults Pi applies to handwritten `models.json` models: `contextWindow: 128_000`, `maxTokens: 16_384`, `input: ["text"]`, `reasoning: false`, and zero cost. Discovered models also default to `compat.supportsDeveloperRole: false` and, without usable thinking metadata, `thinkingLevelMap: { xhigh: null, max: null }`. A catalog that lists only model IDs, such as OpenAI's, therefore yields conservative text-only models; enable images or reasoning for a whole provider with `compat.input` or `compat.reasoning`, and adjust individual models with `modelOverrides`. Token limits are selected independently; `maxTokens` is not clamped to `contextWindow`, but Pi limits each request's output to the remaining context window.
 
-Provider-level `compat` overrides the default compatibility flags on discovered models. Its `input`, `reasoning` and `thinkingLevelMap` fields are extracted into model-level fields; `thinkingLevelMap` entries override the default `xhigh` / `max` values. The extension does not read a model-level `thinkingLevelMap` from the catalog. Pi applies `modelOverrides` by model ID after discovery, so these explicit user overrides take precedence over the discovered metadata.
+Provider-level `compat` overrides the default compatibility flags on discovered models. Its `input`, `reasoning` and `thinkingLevelMap` fields are extracted into model-level fields; `thinkingLevelMap` entries override the discovered mapping and default `xhigh` / `max` values. Pi applies `modelOverrides` by model ID after discovery, so these explicit user overrides take precedence over the discovered metadata.
 
 ## Tests
 

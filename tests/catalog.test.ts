@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { getSupportedThinkingLevels, type Api, type Model } from "@earendil-works/pi-ai";
 import { buildModel, canonicalizeModel, parseModels } from "../model-discovery.ts";
 
 // Metadata aliases and precedence from upstream PR #241 (858660e).
@@ -88,9 +89,67 @@ test("model reasoning accepts supported objects but provider reasoning requires 
   assert.deepEqual(parseModels(entries).map((m) => m.reasoning), [false, false, true]);
   assert.deepEqual(parseModels(entries, { reasoning: { supported: true } }).map((m) => m.reasoning), [false, false, true]);
   assert.deepEqual(parseModels(entries, { reasoning: true }).map((m) => m.reasoning), [true, true, true]);
-  const advertised = [{ id: "model", reasoning: true, thinkingLevelMap: { xhigh: "high" } }];
+  const advertised = [{ id: "model", reasoning: true, reasoning_levels: ["low", "high", "max"] }];
   assert.equal(parseModels(advertised, { reasoning: false })[0].reasoning, false);
-  assert.deepEqual(parseModels(advertised)[0].thinkingLevelMap, { xhigh: null, max: null });
+});
+
+test("advertised thinking levels expose max and hide unlisted levels in Pi", () => {
+  const levels = ["low", "high", "max"];
+  const models = parseModels([
+    { id: "kimi-code-cn/k3.1-pro", reasoning: true, reasoning_levels: levels,
+      supported_reasoning_levels: levels.map((effort) => ({ effort })) },
+    { id: "kimi-code-cn/k3.1-pro-highspeed", reasoning: true,
+      supported_reasoning_levels: levels.map((effort) => ({ effort })) },
+  ]);
+  for (const model of models) {
+    assert.deepEqual(model.thinkingLevelMap, {
+      off: null, minimal: null, low: "low", medium: null, high: "high", xhigh: null, max: "max",
+    });
+    assert.deepEqual(getSupportedThinkingLevels(model as Model<Api>), levels);
+  }
+  assert.deepEqual(parseModels(JSON.parse(JSON.stringify(models))), models, "normalized mappings survive cache parsing");
+});
+
+test("thinking lists use the first usable source and normalize none to off", () => {
+  const models = parseModels([
+    { id: "flat-first", reasoning_levels: ["low", "max"], supported_reasoning_levels: [{ effort: "high" }] },
+    { id: "empty", reasoning_levels: [], supported_reasoning_levels: [{ effort: "xhigh" }] },
+    { id: "invalid", reasoning_levels: "high", supported_reasoning_levels: [{ effort: "high" }] },
+    { id: "unknown", reasoning_levels: [null, {}, 1, "unknown", "MAX"],
+      supported_reasoning_levels: [null, {}, { effort: 1 }, { effort: "max" }] },
+    { id: "off", reasoning_levels: ["none", "low", "high", "high"] },
+    { id: "explicit-off", reasoning_levels: ["none", "off", "medium"] },
+  ].map((model) => ({ ...model, reasoning: true })));
+  assert.deepEqual(models.map((model) => getSupportedThinkingLevels(model as Model<Api>)), [
+    ["low", "max"], ["xhigh"], ["high"], ["max"], ["off", "low", "high"], ["off", "medium"],
+  ]);
+  assert.equal(models[4].thinkingLevelMap?.off, "none");
+  assert.equal(models[5].thinkingLevelMap?.off, "off");
+  for (const raw of [
+    {}, { reasoning_levels: [] }, { reasoning_levels: ["unknown", 42] },
+    { supported_reasoning_levels: [] }, { supported_reasoning_levels: ["max", null, { effort: false }] },
+    { reasoning_levels: {}, supported_reasoning_levels: "high" },
+  ]) {
+    const [model] = parseModels([{ id: "fallback", reasoning: true, ...raw }]);
+    assert.deepEqual(model.thinkingLevelMap, { xhigh: null, max: null });
+    assert.deepEqual(getSupportedThinkingLevels(model as Model<Api>), ["off", "minimal", "low", "medium", "high"]);
+  }
+});
+
+test("explicit model mappings override lists and provider mappings override model mappings", () => {
+  const raw = [{ id: "model", reasoning: true, reasoning_levels: ["low", "high", "max"],
+    thinkingLevelMap: { low: null, medium: "balanced", max: "maximum", high: false, xhigh: " ", invalid: "max" } }];
+  const [model] = parseModels(raw);
+  assert.deepEqual(model.thinkingLevelMap, {
+    off: null, minimal: null, low: null, medium: "balanced", high: "high", xhigh: null, max: "maximum",
+  });
+  const [overridden] = parseModels(raw, { thinkingLevelMap: { max: null, xhigh: "maximum" } });
+  assert.deepEqual(overridden.thinkingLevelMap, { ...model.thinkingLevelMap, max: null, xhigh: "maximum" });
+  assert.equal("thinkingLevelMap" in overridden.compat!, false);
+  assert.deepEqual(parseModels([{ id: "explicit-only", thinkingLevelMap: { max: "max", low: null } }])[0].thinkingLevelMap,
+    { xhigh: null, max: "max", low: null });
+  assert.deepEqual(parseModels([{ id: "invalid", thinkingLevelMap: { max: 42, xhigh: "", high: [] } }])[0].thinkingLevelMap,
+    { xhigh: null, max: null });
 });
 
 test("costs use finite nonnegative prices per million with explicit costs first", () => {

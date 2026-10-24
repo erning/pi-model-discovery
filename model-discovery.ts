@@ -18,6 +18,7 @@ export interface ModelMetadata {
   maxTokens?: number;
   input?: ChatModelConfig["input"];
   reasoning?: boolean;
+  thinkingLevelMap?: ChatModelConfig["thinkingLevelMap"];
   cost?: Partial<ModelCostRates>;
 }
 
@@ -59,7 +60,7 @@ type Notify = (message: string, level?: "info" | "warning") => void;
 type FetchCache = Map<string, Promise<ChatModelConfig[]>>;
 
 // Bump when parsing or defaults change, so cached models are rebuilt from the catalog.
-const MODEL_FORMAT = 3;
+const MODEL_FORMAT = 4;
 // Pi refreshes catalogs in the background on every interactive start. Like Pi's built-in
 // catalogs, skip the request when the last successful fetch is this recent.
 const REFRESH_INTERVAL_MS = 4 * 60 * 60 * 1000;
@@ -103,6 +104,35 @@ function modelInput(raw: Record<string, unknown>, capabilities: Record<string, u
   return image === undefined ? undefined : image ? ["text", "image"] : ["text"];
 }
 
+const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+
+function thinkingFromLevels(value: unknown, structured = false): ChatModelConfig["thinkingLevelMap"] {
+  if (!Array.isArray(value)) return undefined;
+  const efforts = value.map((entry) => structured ? asRecord(entry).effort : entry);
+  const map: NonNullable<ChatModelConfig["thinkingLevelMap"]> = {};
+  let recognized = false;
+  for (const level of THINKING_LEVELS) {
+    // OpenAI catalogs use `none` for disabled reasoning; Pi calls this level `off`.
+    const effort = efforts.includes(level) ? level : level === "off" && efforts.includes("none") ? "none" : null;
+    map[level] = effort;
+    if (effort !== null) recognized = true;
+  }
+  return recognized ? map : undefined;
+}
+
+function modelThinkingLevelMap(raw: Record<string, unknown>): ChatModelConfig["thinkingLevelMap"] {
+  const map = thinkingFromLevels(raw.reasoning_levels)
+    ?? thinkingFromLevels(raw.supported_reasoning_levels, true);
+  const explicit = asRecord(raw.thinkingLevelMap);
+  const merged = { ...map };
+  for (const level of THINKING_LEVELS) {
+    const value = explicit[level];
+    if (value === null || (typeof value === "string" && value.trim().length > 0)) merged[level] = value;
+  }
+  // Also preserves the normalized mapping when models are read back from our cache.
+  return Object.keys(merged).length ? merged : undefined;
+}
+
 export function canonicalizeModel(value: unknown): ModelMetadata | undefined {
   const raw = asRecord(value);
   if (typeof raw.id !== "string" || raw.id.trim().length === 0) return undefined;
@@ -130,6 +160,7 @@ export function canonicalizeModel(value: unknown): ModelMetadata | undefined {
     reasoning: capabilitySupported(raw.reasoning)
       ?? capabilitySupported(capabilities.reasoning)
       ?? capabilitySupported(capabilities.thinking),
+    thinkingLevelMap: modelThinkingLevelMap(raw),
     cost: {
       input: nonNegativeCost(cost.input, pricing.input_per_million),
       output: nonNegativeCost(cost.output, pricing.output_per_million),
@@ -151,6 +182,7 @@ export function buildModel(model: ModelMetadata, providerCompat?: Record<string,
     thinkingLevelMap: {
       xhigh: null,
       max: null,
+      ...model.thinkingLevelMap,
       ...asRecord(thinkingLevelMap) as ChatModelConfig["thinkingLevelMap"],
     },
     compat: { supportsDeveloperRole: false, ...compat },
