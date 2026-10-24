@@ -70,6 +70,8 @@ Add `"discoverModels": true` to a provider in `<agent-dir>/models.json`. The age
 
 Discovered models are cached per provider ID in `<agent-dir>/cache/pi-model-discovery.json`, together with the time they were fetched. At startup, a cache entry with a matching fingerprint is loaded without a catalog request. Providers without one are fetched concurrently, before Pi selects a startup model. The fingerprint includes `baseUrl`, API type, `modelsUrl`, resolved header values, the resolved `apiKey` (for a `!command` key, its text), provider `compat`, and the extension's model format version. Changes to those values invalidate the cache; changing only a provider's name or `modelOverrides` does not. Environment variables in those values must still resolve to verify the fingerprint, even when offline.
 
+`pi --list-models` (including `pi --list-models <search>`) refreshes discovery catalogs before listing models whenever networking is allowed, regardless of cache age. Successful requests update the cache; failed requests retain the last matching cached models. `--offline` or `PI_OFFLINE=1` keeps listing cache-only. Providers using `!command` API keys retain the startup behavior described above: listing does not execute those commands and uses matching cached models when available.
+
 Pi also refreshes model catalogs itself: in the background after interactive or RPC startup, and when `/model` or the scoped model selector needs fresh catalogs. Each refresh calls the provider's `refreshModels` hook twice:
 
 - First with `allowNetwork: false`, which returns the cached models, or leaves the current models unchanged when there are none. Handwritten fallback models therefore stay until discovery succeeds.

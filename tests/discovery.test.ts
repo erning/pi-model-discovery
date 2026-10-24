@@ -20,9 +20,12 @@ async function harness(t: TestContext, mockFetch = true) {
   const dir = await mkdtemp(join(tmpdir(), "pi-model-discovery-"));
   const oldDir = process.env.PI_CODING_AGENT_DIR;
   const oldOffline = process.env.PI_OFFLINE;
+  const oldArgv = process.argv;
+  process.argv = oldArgv.slice(0, 2);
   process.env.PI_OFFLINE = "0";
   process.env.PI_CODING_AGENT_DIR = dir;
   t.after(async () => {
+    process.argv = oldArgv;
     if (oldDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
     else process.env.PI_CODING_AGENT_DIR = oldDir;
     if (oldOffline === undefined) delete process.env.PI_OFFLINE;
@@ -82,6 +85,76 @@ test("startup shares requests, then cache and offline refresh retain advertised 
   assert.equal(h.requests.length, 1);
   assert.equal(h.notices.length, 0);
 });
+
+for (const age of [0, 5 * 60 * 60 * 1000]) {
+  test(`--list-models refreshes and persists cached catalogs aged ${age}ms`, async (t) => {
+    const h = await harness(t);
+    await h.configure({ one: provider, two: provider });
+    await h.start();
+    const cache = JSON.parse(await h.cache());
+    for (const entry of Object.values(cache.providers) as Array<{ fetchedAt: number }>) entry.fetchedAt = Date.now() - age;
+    await writeFile(h.cachePath, JSON.stringify(cache));
+    h.setPayload([{ id: "new-model", reasoning: true, reasoning_levels: ["low", "max"] }]);
+    process.argv.push("--list-models", "new-model");
+    await h.start();
+    assert.equal(h.requests.length, 2, "providers sharing a catalog share the listing request");
+    for (const id of ["one", "two"]) assert.equal(h.registrations.get(id)!.models![0].id, "new-model");
+    const refreshed = h.registrations.get("one")!.models;
+    assert.deepEqual(await h.registrations.get("one")!.refreshModels!(refreshContext(true)), refreshed);
+    assert.equal(h.requests.length, 2, "a subsequent runtime refresh reuses the newly fetched catalog");
+    process.argv = process.argv.slice(0, 2);
+    await h.start();
+    assert.equal(h.requests.length, 2);
+    assert.deepEqual(h.registrations.get("one")!.models, refreshed);
+  });
+}
+
+test("--list-models retains cached models and disk cache when the catalog fails", async (t) => {
+  const h = await harness(t);
+  await h.configure({ one: provider });
+  await h.start();
+  const before = await h.cache();
+  const models = h.registrations.get("one")!.models;
+  process.argv.push("--list-models");
+  for (const malformed of [false, true]) {
+    h.setStatus(malformed ? 200 : 503);
+    h.setPayload([]);
+    await h.start();
+    assert.deepEqual(h.registrations.get("one")!.models, models);
+    assert.equal(await h.cache(), before);
+  }
+  assert.equal(h.requests.length, 3);
+  assert.ok(h.notices.some((message) => message.includes("discovery failed")));
+});
+
+for (const mode of ["offline-flag", "offline-env", "positional", "option-value", "command-key"]) {
+  test(`listing refresh respects ${mode}`, async (t) => {
+    const h = await harness(t);
+    const config = mode === "command-key" ? { ...provider, apiKey: "!must-not-execute" } : provider;
+    await h.configure({ one: config });
+    if (mode === "command-key") {
+      await h.start();
+      h.setPiKey("resolved-key");
+      await h.refresh();
+    } else {
+      await h.start();
+    }
+    const models = h.registrations.get("one")!.models;
+    const requests = h.requests.length;
+    h.setPayload([{ id: "new-model" }]);
+    if (mode === "offline-flag") process.argv.push("--offline", "--list-models");
+    if (mode === "offline-env") {
+      process.env.PI_OFFLINE = "true";
+      process.argv.push("--list-models");
+    }
+    if (mode === "positional") process.argv.push("--", "--list-models");
+    if (mode === "option-value") process.argv.push("--system-prompt", "--list-models");
+    if (mode === "command-key") process.argv.push("--list-models");
+    await h.start();
+    assert.equal(h.requests.length, requests);
+    assert.deepEqual(h.registrations.get("one")!.models, models);
+  });
+}
 
 test("thinking levels survive startup, cache reuse and refresh; old model formats are refetched", async (t) => {
   const h = await harness(t);

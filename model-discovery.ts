@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 import type { Api, ModelCostRates } from "@earendil-works/pi-ai";
 import {
   getAgentDir,
+  parseArgs,
   type ExtensionAPI,
   type ProviderConfig,
   type ProviderModelConfig,
@@ -350,7 +351,9 @@ export default async function discoveryExtension(pi: ExtensionAPI): Promise<void
   pi.on("session_shutdown", () => { showNotice = undefined; });
 
   // Pi normalizes --offline to PI_OFFLINE=1 before loading extensions.
-  const offline = /^(1|true|yes)$/i.test(process.env.PI_OFFLINE ?? "");
+  const args = parseArgs(process.argv.slice(2));
+  const offline = args.offline === true || /^(1|true|yes)$/i.test(process.env.PI_OFFLINE ?? "");
+  const refreshForListing = !offline && args.listModels !== undefined;
   const agentDir = getAgentDir();
   const cachePath = join(agentDir, "cache", "pi-model-discovery.json");
   const providers = await readProviders(join(agentDir, "models.json"), notify);
@@ -398,7 +401,7 @@ export default async function discoveryExtension(pi: ExtensionAPI): Promise<void
     return state;
   });
 
-  // Start every uncached request before awaiting any, so slow catalogs time out together.
+  // Start requests concurrently, including forced listing refreshes, so slow catalogs time out together.
   const startupRequests: FetchCache = new Map();
   await Promise.all(states.map(async (state) => {
     const { entry } = state;
@@ -412,7 +415,7 @@ export default async function discoveryExtension(pi: ExtensionAPI): Promise<void
           notify(`${entry.id}: invalid cached models; ignoring cache.`);
         }
       }
-      if (state.models) return;
+      if (state.models && (!refreshForListing || entry.apiKey?.startsWith("!"))) return;
       if (offline) {
         notify(`${entry.id}: offline mode; no matching model cache. Keeping configured fallback models.`);
       } else if (entry.apiKey?.startsWith("!")) {
